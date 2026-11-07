@@ -36,8 +36,10 @@ proxy-cheap logout --browser-data         # also delete the browser profile
 The login window uses its own profile at
 `~/.config/proxy-cheap/browser-profile`, so it never touches the normal browser
 session. The first login may show a Cloudflare check once; the clearance is kept
-in that profile. The token expires after roughly 30 days; run `login` again when
-`config show` reports an expiry in the past.
+in that profile. The environment and API base are stored with the token, so
+`login --environment staging` switches later commands to staging. The token
+expires after roughly 30 days; run `login` again when `config show` reports an
+expiry in the past.
 
 ### API keys
 

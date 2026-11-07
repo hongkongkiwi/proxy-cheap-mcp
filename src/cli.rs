@@ -933,9 +933,11 @@ pub async fn run(cli: Cli) -> Result<()> {
             }
             if !force {
                 if let Some(token) = effective.session_token.as_deref() {
-                    let usable =
-                        login::jwt_expiry(token).is_none_or(|expiry| expiry > now_unix() + 60);
-                    if usable {
+                    let unexpired =
+                        login::jwt_expiry(token).is_some_and(|expiry| expiry > now_unix() + 60);
+                    let same_environment =
+                        effective.session_token_environment.as_deref() == Some(environment.label());
+                    if unexpired && same_environment {
                         return output.print(&json!({
                             "loggedIn": true,
                             "alreadyLoggedIn": true,
@@ -970,9 +972,10 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
         Command::Logout { browser_data } => {
             let path = config::config_path();
-            let mut file = config::load_from(&path)?.unwrap_or_default();
+            let mut file = config::load_for_update(&path)?.unwrap_or_default();
             let had_token = file.session_token.take().is_some();
             file.session_token_expires_at = None;
+            file.session_token_environment = None;
             if had_token || path.exists() {
                 config::save_to(&path, &file)?;
             }
@@ -1009,13 +1012,15 @@ pub async fn run(cli: Cli) -> Result<()> {
                         path.display()
                     )));
                 }
-                let existing = config::load_from(&path)?.unwrap_or_default();
+                let existing = config::load_for_update(&path)?.unwrap_or_default();
                 let merged = config::FileConfig {
                     api_key: api_key.or(existing.api_key),
                     api_secret: api_secret.or(existing.api_secret),
                     session_token: existing.session_token,
                     session_token_expires_at: existing.session_token_expires_at,
+                    session_token_environment: existing.session_token_environment,
                     base_url: base_url.or(existing.base_url),
+                    extra: existing.extra,
                 };
                 if merged.api_key.is_none() || merged.api_secret.is_none() {
                     return Err(Error::InvalidInput(
@@ -1038,6 +1043,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 "apiSecret": config.api_secret.as_deref().map(config::redact),
                 "sessionToken": config.session_token.as_deref().map(config::redact),
                 "sessionTokenExpiresAt": config.session_token_expires_at,
+                "sessionTokenEnvironment": config.session_token_environment,
                 "apiKeyConfigured": config.has_api_key(),
                 "sessionTokenConfigured": config.has_session_token(),
                 "timeoutSeconds": config.timeout_secs,

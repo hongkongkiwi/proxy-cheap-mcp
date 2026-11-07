@@ -28,7 +28,12 @@ pub struct FileConfig {
     pub session_token: Option<String>,
     /// JWT expiry as Unix seconds, decoded locally for display and re-login.
     pub session_token_expires_at: Option<i64>,
+    /// Environment the session token belongs to (production, staging, local).
+    pub session_token_environment: Option<String>,
     pub base_url: Option<String>,
+    /// Preserve keys this version does not know about when rewriting the file.
+    #[serde(flatten)]
+    pub extra: toml::Table,
 }
 
 #[derive(Debug, Clone)]
@@ -37,6 +42,7 @@ pub struct ClientConfig {
     pub api_secret: Option<String>,
     pub session_token: Option<String>,
     pub session_token_expires_at: Option<i64>,
+    pub session_token_environment: Option<String>,
     pub base_url: String,
     pub timeout_secs: u64,
     pub max_retries: u32,
@@ -49,6 +55,7 @@ impl ClientConfig {
             api_secret: None,
             session_token: None,
             session_token_expires_at: None,
+            session_token_environment: None,
             base_url: normalise_base_url(base_url.as_deref().unwrap_or(DEFAULT_BASE_URL))?,
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             max_retries: DEFAULT_RETRIES,
@@ -67,14 +74,14 @@ impl ClientConfig {
         let api_key = non_empty(api_key.or(file.api_key));
         let api_secret = non_empty(api_secret.or(file.api_secret));
         let session_token = non_empty(session_token.or(file.session_token));
-        let session_token_expires_at = file.session_token_expires_at;
         let base_url =
             non_empty(base_url.or(file.base_url)).unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
         Ok(Self {
             api_key,
             api_secret,
             session_token,
-            session_token_expires_at,
+            session_token_expires_at: file.session_token_expires_at,
+            session_token_environment: file.session_token_environment,
             base_url: normalise_base_url(&base_url)?,
             timeout_secs,
             max_retries,
@@ -156,8 +163,39 @@ pub fn browser_profile_dir() -> PathBuf {
     config_home().join("proxy-cheap").join("browser-profile")
 }
 
+/// Load the active config, migrating a pre-XDG macOS file if it exists.
 pub fn load_file() -> Result<Option<FileConfig>> {
-    load_from(&config_path())
+    let path = config_path();
+    if let Some(config) = load_from(&path)? {
+        return Ok(Some(config));
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(legacy) = legacy_config_path() {
+        if legacy != path {
+            if let Some(config) = load_from(&legacy)? {
+                if let Err(error) = save_to(&path, &config) {
+                    tracing::warn!(%error, "could not migrate the legacy config file");
+                }
+                return Ok(Some(config));
+            }
+        }
+    }
+    Ok(None)
+}
+
+#[cfg(target_os = "macos")]
+fn legacy_config_path() -> Option<PathBuf> {
+    dirs::config_dir().map(|directory| directory.join("proxy-cheap").join("config.toml"))
+}
+
+/// Load the file that a write will replace. When it is the active config path,
+/// the legacy migration and fallback apply too.
+pub fn load_for_update(path: &Path) -> Result<Option<FileConfig>> {
+    if path == config_path() {
+        load_file()
+    } else {
+        load_from(path)
+    }
 }
 
 pub fn load_from(path: &Path) -> Result<Option<FileConfig>> {
@@ -176,22 +214,88 @@ pub fn load_from(path: &Path) -> Result<Option<FileConfig>> {
     }
 }
 
+/// Write the config atomically under an exclusive lock. The temporary file is
+/// created with mode 0600 on Unix, so a new token-bearing file is never
+/// world-readable, and a failed write leaves the previous file intact.
 pub fn save_to(path: &Path, config: &FileConfig) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        let created = !parent.exists();
-        fs::create_dir_all(parent).map_err(|error| {
-            Error::Config(format!("could not create {}: {error}", parent.display()))
-        })?;
-        if created {
-            restrict_permissions(parent, 0o700)?;
-        }
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let created = !parent.exists();
+    fs::create_dir_all(parent).map_err(|error| {
+        Error::Config(format!("could not create {}: {error}", parent.display()))
+    })?;
+    if created {
+        restrict_permissions(parent, 0o700)?;
     }
+
+    let lock_path = path.with_extension("lock");
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|error| {
+            Error::Config(format!("could not open {}: {error}", lock_path.display()))
+        })?;
+    restrict_permissions(&lock_path, 0o600)?;
+    fs2::FileExt::lock_exclusive(&lock).map_err(|error| {
+        Error::Config(format!("could not lock {}: {error}", lock_path.display()))
+    })?;
+
     let text = toml::to_string_pretty(config)
         .map_err(|error| Error::Config(format!("could not serialise config: {error}")))?;
-    fs::write(path, text)
-        .map_err(|error| Error::Config(format!("could not write {}: {error}", path.display())))?;
+    let temporary = path.with_extension(format!("tmp.{}", std::process::id()));
+    let result = replace_file(&temporary, path, &text);
+    let _ = fs2::FileExt::unlock(&lock);
+    result
+}
+
+fn replace_file(temporary: &Path, path: &Path, text: &str) -> Result<()> {
+    let _ = fs::remove_file(temporary);
+    write_private(temporary, text)?;
+    fs::rename(temporary, path).map_err(|error| {
+        let _ = fs::remove_file(temporary);
+        Error::Config(format!("could not replace {}: {error}", path.display()))
+    })?;
     restrict_permissions(path, 0o600)?;
     Ok(())
+}
+
+fn write_private(path: &Path, text: &str) -> Result<()> {
+    use std::io::Write as _;
+
+    let mut file = open_private(path)
+        .map_err(|error| Error::Config(format!("could not create {}: {error}", path.display())))?;
+    if let Err(error) = file
+        .write_all(text.as_bytes())
+        .and_then(|()| file.sync_all())
+    {
+        drop(file);
+        let _ = fs::remove_file(path);
+        return Err(Error::Config(format!(
+            "could not write {}: {error}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn open_private(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_private(path: &Path) -> std::io::Result<fs::File> {
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
 }
 
 #[cfg(unix)]
@@ -278,7 +382,9 @@ mod tests {
             api_secret: Some("secret".to_string()),
             session_token: Some("header.payload.signature".to_string()),
             session_token_expires_at: Some(1_893_456_000),
+            session_token_environment: Some("production".to_string()),
             base_url: Some("https://api.proxy-cheap.com".to_string()),
+            ..Default::default()
         };
         save_to(&path, &config).unwrap();
 
@@ -290,6 +396,10 @@ mod tests {
             Some("header.payload.signature")
         );
         assert_eq!(loaded.session_token_expires_at, Some(1_893_456_000));
+        assert_eq!(
+            loaded.session_token_environment.as_deref(),
+            Some("production")
+        );
         assert_eq!(
             loaded.base_url.as_deref(),
             Some("https://api.proxy-cheap.com")
@@ -307,6 +417,49 @@ mod tests {
                 & 0o777;
             assert_eq!(parent_mode, 0o700);
         }
+    }
+
+    #[test]
+    fn preserves_unknown_keys() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        fs::write(&path, "api_key = \"key\"\ncustom_setting = \"keep me\"\n").unwrap();
+
+        let mut config = load_from(&path).unwrap().unwrap();
+        assert_eq!(
+            config
+                .extra
+                .get("custom_setting")
+                .and_then(|value| value.as_str()),
+            Some("keep me")
+        );
+        config.api_secret = Some("secret".to_string());
+        save_to(&path, &config).unwrap();
+
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("custom_setting = \"keep me\""));
+    }
+
+    #[test]
+    fn concurrent_saves_leave_valid_toml() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let mut handles = Vec::new();
+        for index in 0..8 {
+            let path = path.clone();
+            handles.push(std::thread::spawn(move || {
+                let config = FileConfig {
+                    api_key: Some(format!("key-{index}")),
+                    ..Default::default()
+                };
+                save_to(&path, &config).unwrap();
+            }));
+        }
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        let loaded = load_from(&path).unwrap().unwrap();
+        assert!(loaded.api_key.unwrap().starts_with("key-"));
     }
 
     #[test]

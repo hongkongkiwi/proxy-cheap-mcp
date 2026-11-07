@@ -208,19 +208,28 @@ pub async fn capture_session(options: &LoginOptions) -> Result<String> {
     };
     let page = match page {
         Some(page) => page,
-        None => browser
-            .new_page("about:blank")
-            .await
-            .map_err(|error| Error::Config(format!("could not open a browser tab: {error}")))?,
+        None => match browser.new_page("about:blank").await {
+            Ok(page) => page,
+            Err(error) => {
+                close_browser(&mut browser, &mut handler_task).await;
+                return Err(Error::Config(format!(
+                    "could not open a browser tab: {error}"
+                )));
+            }
+        },
     };
-    page.add_init_script(INIT_SCRIPT)
-        .await
-        .map_err(|error| Error::Config(format!("could not prepare the browser page: {error}")))?;
-    page.goto(login_url.clone()).await.map_err(|error| {
-        Error::Config(format!(
+    if let Err(error) = page.add_init_script(INIT_SCRIPT).await {
+        close_browser(&mut browser, &mut handler_task).await;
+        return Err(Error::Config(format!(
+            "could not prepare the browser page: {error}"
+        )));
+    }
+    if let Err(error) = page.goto(login_url.clone()).await {
+        close_browser(&mut browser, &mut handler_task).await;
+        return Err(Error::Config(format!(
             "could not open {login_url} in the browser: {error}"
-        ))
-    })?;
+        )));
+    }
     let cookie_name = options.cookie_name();
     tracing::info!(
         "log in in the opened browser window; waiting up to {}s for the {cookie_name} cookie",

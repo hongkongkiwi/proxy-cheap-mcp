@@ -10,6 +10,7 @@ fn config(base_url: &str) -> ClientConfig {
         api_secret: None,
         session_token: None,
         session_token_expires_at: None,
+        session_token_environment: None,
         base_url: base_url.to_string(),
         timeout_secs: 5,
         max_retries: 0,
@@ -38,9 +39,35 @@ async fn stores_a_valid_token() {
     assert_eq!(file.session_token.as_deref(), Some("test-token"));
     assert!(file.session_token_expires_at.is_none());
     assert_eq!(
+        file.session_token_environment.as_deref(),
+        Some("production")
+    );
+    assert_eq!(file.base_url.as_deref(), Some(mock.base_url()));
+    assert_eq!(
         mock.last().header("authorization").as_deref(),
         Some("Bearer test-token")
     );
+}
+
+#[tokio::test]
+async fn persists_the_environment_and_api_base() {
+    let mock = common::start().await;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+
+    login::store_token(
+        &config(mock.base_url()),
+        &path,
+        "test-token",
+        Environment::Staging,
+        directory.path().join("profile"),
+    )
+    .await
+    .unwrap();
+
+    let file = config::load_from(&path).unwrap().unwrap();
+    assert_eq!(file.session_token_environment.as_deref(), Some("staging"));
+    assert_eq!(file.base_url.as_deref(), Some(mock.base_url()));
 }
 
 #[tokio::test]
@@ -74,7 +101,9 @@ async fn preserves_existing_api_keys() {
             api_secret: Some("secret".to_string()),
             session_token: None,
             session_token_expires_at: None,
+            session_token_environment: None,
             base_url: None,
+            ..Default::default()
         },
     )
     .unwrap();

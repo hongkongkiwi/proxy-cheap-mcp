@@ -52,7 +52,9 @@ proxy-cheap logout --browser-data         # also delete the browser profile
 
 The login window uses a dedicated profile at `~/.config/proxy-cheap/browser-profile`, separate from the normal browser. Chrome, Edge, Brave, and Chromium are detected; override with `--browser` or `PROXY_CHEAP_BROWSER`. The first login may require a Cloudflare check once, after which the clearance is kept in that profile. Tokens expire after roughly 30 days; run `login` again when needed.
 
-A session token is a dashboard credential, not a scoped API key. Keep the config file private. `logout` removes the token but keeps API keys; `logout --browser-data` also deletes the dedicated profile and its cookies.
+The environment and API base are stored with the token, so later commands use the same host. `login --environment staging` switches the stored token to staging; the next login check detects the mismatch instead of reusing a production token. On macOS, an older config at `~/Library/Application Support/proxy-cheap/config.toml` is migrated to `~/.config/proxy-cheap/config.toml` on first load.
+
+A session token is a dashboard credential, not a scoped API key. Keep the config file private; it is written atomically with mode 0600 on Unix. `logout` removes the token but keeps API keys; `logout --browser-data` also deletes the dedicated profile and its cookies.
 
 ### API keys
 

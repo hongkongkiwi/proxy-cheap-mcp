@@ -4,7 +4,13 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 
+use base64::Engine as _;
 use serde_json::{Value, json};
+
+fn future_jwt() -> String {
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"exp":4102444800}"#);
+    format!("eyJhbGciOiJub25lIn0.{payload}.signature")
+}
 
 fn binary() -> &'static str {
     env!("CARGO_BIN_EXE_proxy-cheap")
@@ -257,7 +263,10 @@ fn login_reports_an_existing_session_without_opening_a_browser() {
     fs::create_dir_all(&config_dir).unwrap();
     fs::write(
         config_dir.join("config.toml"),
-        "session_token = \"opaque-token\"\n",
+        format!(
+            "session_token = \"{}\"\nsession_token_environment = \"production\"\nbase_url = \"https://api.proxy-cheap.com\"\n",
+            future_jwt()
+        ),
     )
     .unwrap();
 
@@ -283,7 +292,7 @@ fn logout_removes_the_session_but_keeps_api_keys_and_can_delete_browser_data() {
     fs::create_dir_all(&config_dir).unwrap();
     fs::write(
         config_dir.join("config.toml"),
-        "api_key = \"key\"\napi_secret = \"secret\"\nsession_token = \"opaque-token\"\nsession_token_expires_at = 1893456000\n",
+        "api_key = \"key\"\napi_secret = \"secret\"\nsession_token = \"opaque-token\"\nsession_token_expires_at = 1893456000\nsession_token_environment = \"production\"\n",
     )
     .unwrap();
     let profile = config_dir.join("browser-profile");
@@ -298,6 +307,7 @@ fn logout_removes_the_session_but_keeps_api_keys_and_can_delete_browser_data() {
     assert_eq!(stdout_json(&output)["removedSessionToken"], true);
     let text = fs::read_to_string(config_dir.join("config.toml")).unwrap();
     assert!(!text.contains("session_token"));
+    assert!(!text.contains("session_token_environment"));
     assert!(text.contains("api_key = \"key\""));
     assert!(text.contains("api_secret = \"secret\""));
     assert!(

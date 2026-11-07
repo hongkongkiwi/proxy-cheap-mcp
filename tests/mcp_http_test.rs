@@ -30,6 +30,7 @@ fn mcp_server(base_url: &str) -> Arc<McpServer> {
         api_secret: Some("secret".to_string()),
         session_token: None,
         session_token_expires_at: None,
+        session_token_environment: None,
         base_url: base_url.to_string(),
         timeout_secs: 5,
         max_retries: 0,

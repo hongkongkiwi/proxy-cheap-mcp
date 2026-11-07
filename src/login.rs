@@ -58,9 +58,13 @@ pub async fn store_token(
         ));
     }
 
-    let mut file = config::load_from(path)?.unwrap_or_default();
+    let mut file = config::load_for_update(path)?.unwrap_or_default();
     file.session_token = Some(token.to_string());
     file.session_token_expires_at = expires_at;
+    file.session_token_environment = Some(environment.label().to_string());
+    // Remember the API host the token was validated against. Without this a
+    // staging or local token would be sent to the production API afterwards.
+    file.base_url = Some(config.base_url.clone());
     config::save_to(path, &file)?;
 
     Ok(LoginOutcome {
@@ -76,6 +80,7 @@ async fn validate_token(config: &ClientConfig, token: &str) -> Result<()> {
         api_secret: None,
         session_token: Some(token.to_string()),
         session_token_expires_at: None,
+        session_token_environment: None,
         base_url: config.base_url.clone(),
         timeout_secs: config.timeout_secs,
         max_retries: 0,
