@@ -957,17 +957,21 @@ pub async fn run(cli: Cli) -> Result<()> {
             options.timeout = Duration::from_secs(login_timeout);
             let path = config::config_path();
             let outcome = login::capture_and_store(&effective, &path, &options).await?;
-            let note = effective
-                .has_api_key()
-                .then_some("existing API keys take precedence over the session token");
+            let warning = effective.has_api_key().then(|| {
+                format!(
+                    "existing API keys take precedence and will be sent to {}; remove them to use the session token",
+                    effective.base_url
+                )
+            });
             output.print(&json!({
                 "loggedIn": true,
                 "environment": outcome.environment.label(),
                 "authMethod": "session-token",
+                "baseUrl": effective.base_url,
                 "expiresAt": outcome.expires_at,
                 "configPath": path,
                 "profileDir": outcome.profile_dir,
-                "note": note,
+                "warning": warning,
             }))
         }
         Command::Logout { browser_data } => {

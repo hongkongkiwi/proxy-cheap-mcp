@@ -71,7 +71,7 @@ Or persist them in the config file:
 proxy-cheap config init --api-key ... --api-secret ...
 ```
 
-API keys take precedence over a stored session token. Use one or the other. `PROXY_CHEAP_SESSION_TOKEN` can supply a token directly.
+API keys take precedence over a stored session token. Use one or the other; if both exist, `login` reports the API base your keys will be sent to and warns about the precedence. `PROXY_CHEAP_SESSION_TOKEN` can supply a token directly.
 
 Resolution order: command-line flags, environment, `~/.config/proxy-cheap/config.toml`, then defaults. Service discovery, setup options, and pricing are public and work without credentials. Ordering and all account or proxy calls need them.
 
