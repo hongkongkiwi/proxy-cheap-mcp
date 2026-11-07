@@ -37,6 +37,7 @@ impl Captured {
 struct Inner {
     requests: Mutex<Vec<Captured>>,
     failures: AtomicU32,
+    price_failures: AtomicU32,
     flaky_services: bool,
 }
 
@@ -80,6 +81,7 @@ async fn start_with(flaky_services: bool) -> MockApi {
     let inner = Arc::new(Inner {
         requests: Mutex::new(Vec::new()),
         failures: AtomicU32::new(0),
+        price_failures: AtomicU32::new(0),
         flaky_services,
     });
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -144,20 +146,21 @@ async fn handle(
             "periods": {"months": [1, 12]}
         }))
         .into_response(),
-        ("POST", "/v2/order/static-datacenter-ipv4/price") => Json(json!({
-            "appliedDiscounts": [],
-            "finalPrice": 3.39,
-            "priceNoDiscounts": 3.39,
-            "discount": 0,
-            "unitPrice": 3.39,
-            "unitPriceAfterDiscount": 3.39,
-            "additionalAmount": 0,
-            "additionalAmountAfterDiscount": 0,
-            "paymentFee": 0,
-            "subtotal": 3.39,
-            "discountAmount": 0,
-            "finalPriceInCurrency": 3.39,
-            "currency": "USD"
+        ("POST", "/v2/order/static-datacenter-ipv4/price") => Json(price_json()).into_response(),
+        ("POST", "/v2/order/price-limited/price") => {
+            let failures = state.price_failures.fetch_add(1, Ordering::SeqCst);
+            if failures < 2 {
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(json!({"message": "slow down"})),
+                )
+                    .into_response()
+            } else {
+                Json(price_json()).into_response()
+            }
+        }
+        ("POST", "/v2/order/coupon-service/price") => Json(json!({
+            "errors": {"couponCode": [{"code": "INVALID_COUPON_CODE"}]}
         }))
         .into_response(),
         ("POST", "/v2/order/error-service/price") => {
@@ -240,8 +243,36 @@ async fn handle(
     }
 }
 
+fn price_json() -> Value {
+    json!({
+        "appliedDiscounts": [],
+        "finalPrice": 3.39,
+        "priceNoDiscounts": 3.39,
+        "discount": 0,
+        "unitPrice": 3.39,
+        "unitPriceAfterDiscount": 3.39,
+        "additionalAmount": 0,
+        "additionalAmountAfterDiscount": 0,
+        "paymentFee": 0,
+        "subtotal": 3.39,
+        "discountAmount": 0,
+        "finalPriceInCurrency": 3.39,
+        "currency": "USD"
+    })
+}
+
 fn proxy_action(method: &str, path: &str) -> Response {
     if path.ends_with("/extend-period") && method == "POST" {
+        if path.contains("/proxies/limited/") {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(json!({"message": "slow down"})),
+            )
+                .into_response();
+        }
+        if path.contains("/proxies/error/") {
+            return (StatusCode::INTERNAL_SERVER_ERROR, "boom").into_response();
+        }
         if path.contains("/proxies/bad/") {
             return (
                 StatusCode::UNPROCESSABLE_ENTITY,

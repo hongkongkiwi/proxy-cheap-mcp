@@ -408,6 +408,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handles_batches_and_drops_notifications() {
+        let response = server()
+            .handle(json!([
+                {"jsonrpc": "2.0", "id": 1, "method": "ping"},
+                {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                {"jsonrpc": "2.0", "id": 2, "method": "ping"}
+            ]))
+            .await
+            .unwrap();
+        let responses = response.as_array().unwrap();
+        assert_eq!(responses.len(), 2);
+        assert_eq!(responses[0]["id"], 1);
+        assert_eq!(responses[1]["id"], 2);
+    }
+
+    #[tokio::test]
+    async fn rejects_an_empty_batch() {
+        let response = server().handle(json!([])).await.unwrap();
+        assert_eq!(response["error"]["code"], -32600);
+    }
+
+    #[tokio::test]
     async fn serves_ordering_prompt() {
         let response = server()
             .handle(json!({

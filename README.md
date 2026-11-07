@@ -250,7 +250,7 @@ The published API documentation lags the live API in a few places. This client h
 - Order and proxy identifiers can be numbers, numeric strings, or UUIDs. Numbers and numeric strings are accepted everywhere.
 - `GET /orders/{id}` misspells `periodInMoths`. Both spellings are accepted.
 - Several authenticated endpoints answer bad credentials with a `302` HTML redirect to the login page instead of `401`. Redirects are not followed; they are reported as authentication failures.
-- Retries: `429` is retried for all methods. `5xx` and network errors are retried only for `GET`, because a POST that timed out may already have placed an order.
+- Retries: `429`, `5xx`, and network errors are retried only for read-only or idempotent calls (service discovery, setup, price calculation, protocol or whitelist changes). POSTs that spend money or rotate an IP are never retried, because a timed-out or rate-limited request may already have been processed.
 
 ## Exit codes
 

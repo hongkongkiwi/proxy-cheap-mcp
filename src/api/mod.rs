@@ -14,6 +14,15 @@ use serde::de::DeserializeOwned;
 use crate::config::ClientConfig;
 use crate::error::{Error, Result};
 
+/// Whether a request is safe to replay when the API reports a transient error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Retry {
+    /// Read-only or idempotent: retry 429, 5xx, and network errors.
+    Safe,
+    /// May spend money or change state without idempotence: never retry.
+    Never,
+}
+
 #[derive(Debug, Clone)]
 struct Credentials {
     key: String,
@@ -83,13 +92,13 @@ impl ProxyCheapClient {
             Some(plan_id) if !plan_id.is_empty() => serde_json::json!({ "planId": plan_id }),
             _ => serde_json::json!({}),
         };
-        self.post_json(&path, &body, false).await
+        self.post_json(&path, &body, false, Retry::Safe).await
     }
 
     /// Price an order configuration. Public endpoint.
     pub async fn price(&self, service_id: &str, request: &PriceRequest) -> Result<PriceResponse> {
         let path = format!("/v2/order/{}/price", encode_segment(service_id));
-        self.post_json(&path, request, false).await
+        self.post_json(&path, request, false, Retry::Safe).await
     }
 
     /// Place an order. Spends account balance.
@@ -99,7 +108,7 @@ impl ProxyCheapClient {
         request: &OrderRequest,
     ) -> Result<OrderResponse> {
         let path = format!("/v2/order/{}/execute", encode_segment(service_id));
-        self.post_json(&path, request, true).await
+        self.post_json(&path, request, true, Retry::Never).await
     }
 
     // -- Orders -------------------------------------------------------------
@@ -131,7 +140,7 @@ impl ProxyCheapClient {
         request: &ExtendPeriodRequest,
     ) -> Result<Proxy> {
         let path = format!("/proxies/{}/extend-period", encode_segment(proxy_id));
-        self.post_json(&path, request, true).await
+        self.post_json(&path, request, true, Retry::Never).await
     }
 
     pub async fn period_extension_price(&self, proxy_id: &str, months: u32) -> Result<PriceQuote> {
@@ -143,6 +152,7 @@ impl ProxyCheapClient {
             &path,
             &serde_json::json!({ "periodInMonths": months }),
             true,
+            Retry::Safe,
         )
         .await
     }
@@ -155,6 +165,7 @@ impl ProxyCheapClient {
                 bandwidth: bandwidth_gb,
             },
             true,
+            Retry::Never,
         )
         .await
     }
@@ -167,6 +178,7 @@ impl ProxyCheapClient {
                 bandwidth: bandwidth_gb,
             },
             true,
+            Retry::Safe,
         )
         .await
     }
@@ -174,7 +186,7 @@ impl ProxyCheapClient {
     pub async fn update_whitelist(&self, proxy_id: &str, ips: &[String]) -> Result<Proxy> {
         let path = format!("/proxies/{}/whitelist-ip", encode_segment(proxy_id));
         let request = WhitelistRequest { ips: ips.to_vec() };
-        self.post_json(&path, &request, true).await
+        self.post_json(&path, &request, true, Retry::Safe).await
     }
 
     pub async fn protocol_options(&self, proxy_id: &str) -> Result<ProtocolOptions> {
@@ -185,13 +197,14 @@ impl ProxyCheapClient {
     pub async fn change_protocol(&self, proxy_id: &str, protocol: Protocol) -> Result<()> {
         let path = format!("/proxies/{}/change-protocol", encode_segment(proxy_id));
         let request = ChangeProtocolRequest { new_type: protocol };
-        self.post_empty(&path, &request, true).await
+        self.post_empty(&path, &request, true, Retry::Safe).await
     }
 
     /// Assigns a new public IP. Static mobile proxies only.
     pub async fn rotate_ip(&self, proxy_id: &str) -> Result<()> {
         let path = format!("/proxies/{}/rotate-ip", encode_segment(proxy_id));
-        self.post_empty(&path, &serde_json::json!({}), true).await
+        self.post_empty(&path, &serde_json::json!({}), true, Retry::Never)
+            .await
     }
 
     pub async fn auth_type_options(&self, proxy_id: &str) -> Result<AuthTypeOptions> {
@@ -216,7 +229,7 @@ impl ProxyCheapClient {
             new_auth_type: auth_type,
             ips,
         };
-        self.post_empty(&path, &request, true).await
+        self.post_empty(&path, &request, true, Retry::Safe).await
     }
 
     pub async fn set_auto_extend(&self, proxy_id: &str, enabled: bool) -> Result<()> {
@@ -226,7 +239,8 @@ impl ProxyCheapClient {
             encode_segment(proxy_id),
             action
         );
-        self.post_empty(&path, &serde_json::json!({}), true).await
+        self.post_empty(&path, &serde_json::json!({}), true, Retry::Safe)
+            .await
     }
 
     // -- Account ------------------------------------------------------------
@@ -241,21 +255,26 @@ impl ProxyCheapClient {
         &self,
         request: &LegacyOrderRequest,
     ) -> Result<LegacyConfigurationResponse> {
-        self.post_json("/order/configuration", request, false).await
+        self.post_json("/order/configuration", request, false, Retry::Safe)
+            .await
     }
 
     pub async fn legacy_price(&self, request: &LegacyOrderRequest) -> Result<PriceQuote> {
-        self.post_json("/order/price", request, false).await
+        self.post_json("/order/price", request, false, Retry::Safe)
+            .await
     }
 
     pub async fn legacy_execute(&self, request: &LegacyOrderRequest) -> Result<OrderResponse> {
-        self.post_json("/order/execute", request, true).await
+        self.post_json("/order/execute", request, true, Retry::Never)
+            .await
     }
 
     // -- Transport ----------------------------------------------------------
 
     async fn get_json<T: DeserializeOwned>(&self, path: &str, auth_required: bool) -> Result<T> {
-        let (status, body) = self.send(Method::GET, path, None, auth_required).await?;
+        let (status, body) = self
+            .send(Method::GET, path, None, auth_required, Retry::Safe)
+            .await?;
         parse_json(status, &body)
     }
 
@@ -264,10 +283,11 @@ impl ProxyCheapClient {
         path: &str,
         body: &(impl Serialize + ?Sized),
         auth_required: bool,
+        retry: Retry,
     ) -> Result<T> {
         let body = serde_json::to_vec(body)?;
         let (status, bytes) = self
-            .send(Method::POST, path, Some(body), auth_required)
+            .send(Method::POST, path, Some(body), auth_required, retry)
             .await?;
         parse_json(status, &bytes)
     }
@@ -277,13 +297,20 @@ impl ProxyCheapClient {
         path: &str,
         body: &(impl Serialize + ?Sized),
         auth_required: bool,
+        retry: Retry,
     ) -> Result<()> {
         let body = serde_json::to_vec(body)?;
         let (status, bytes) = self
-            .send(Method::POST, path, Some(body), auth_required)
+            .send(Method::POST, path, Some(body), auth_required, retry)
             .await?;
-        if !bytes.is_empty() && serde_json::from_slice::<serde_json::Value>(&bytes).is_err() {
-            return Err(Error::from_response(status.as_u16(), &bytes));
+        if !bytes.is_empty() {
+            match serde_json::from_slice::<serde_json::Value>(&bytes) {
+                Ok(value) if value.get("errors").is_some_and(|errors| !errors.is_null()) => {
+                    return Err(Error::from_json(status.as_u16(), value));
+                }
+                Ok(_) => {}
+                Err(_) => return Err(Error::from_response(status.as_u16(), &bytes)),
+            }
         }
         Ok(())
     }
@@ -294,13 +321,14 @@ impl ProxyCheapClient {
         path: &str,
         body: Option<Vec<u8>>,
         auth_required: bool,
+        retry: Retry,
     ) -> Result<(StatusCode, Vec<u8>)> {
         if auth_required && self.credentials.is_none() {
             return Err(Error::MissingCredentials);
         }
 
         let url = format!("{}{}", self.base_url, path);
-        let idempotent = method == Method::GET || method == Method::HEAD;
+        let retryable = retry == Retry::Safe;
         let mut attempt = 0u32;
 
         loop {
@@ -320,8 +348,10 @@ impl ProxyCheapClient {
                     .body(body.clone());
             }
 
+            // A POST that may have spent money must never be replayed, not even
+            // on 429: only read-only and idempotent operations are retried.
             let retryable_status = |status: StatusCode| {
-                status == StatusCode::TOO_MANY_REQUESTS || (idempotent && status.is_server_error())
+                retryable && (status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error())
             };
 
             match request.send().await {
@@ -348,7 +378,7 @@ impl ProxyCheapClient {
                 }
                 Err(error)
                     if (error.is_timeout() || error.is_connect())
-                        && idempotent
+                        && retryable
                         && attempt < self.max_retries =>
                 {
                     attempt += 1;
@@ -369,10 +399,20 @@ fn parse_json<T: DeserializeOwned>(status: StatusCode, body: &[u8]) -> Result<T>
             body: None,
         });
     }
-    serde_json::from_slice(body).map_err(|error| Error::Api {
+    let value: serde_json::Value = serde_json::from_slice(body).map_err(|error| Error::Api {
         status: status.as_u16(),
         message: format!("could not parse the API response as JSON: {error}"),
         body: serde_json::from_slice(body).ok(),
+    })?;
+    // Some endpoints report rejected input with HTTP 200 and an `errors` object
+    // (for example an invalid coupon code on the price endpoint).
+    if value.get("errors").is_some_and(|errors| !errors.is_null()) {
+        return Err(Error::from_json(status.as_u16(), value));
+    }
+    serde_json::from_value(value).map_err(|error| Error::Api {
+        status: status.as_u16(),
+        message: format!("could not parse the API response: {error}"),
+        body: None,
     })
 }
 

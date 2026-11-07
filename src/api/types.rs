@@ -777,7 +777,6 @@ pub struct ChangeProtocolRequest {
 #[serde(rename_all = "camelCase")]
 pub struct ChangeAuthTypeRequest {
     pub new_auth_type: AuthType,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub ips: Vec<String>,
 }
 

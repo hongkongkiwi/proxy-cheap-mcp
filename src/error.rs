@@ -46,11 +46,17 @@ impl Error {
     /// Build an API error from a response status and raw body.
     pub fn from_response(status: u16, body: &[u8]) -> Self {
         let parsed = serde_json::from_slice::<Value>(body).ok();
-        let message = if (300..400).contains(&status) {
-            "authentication failed: the API redirected to its login page; check the API key and secret".to_string()
-        } else if let Some(value) = parsed.as_ref() {
-            describe_body(value)
-        } else if body.is_empty() {
+        if (300..400).contains(&status) {
+            return Self::Api {
+                status,
+                message: "authentication failed: the API redirected to its login page; check the API key and secret".to_string(),
+                body: parsed,
+            };
+        }
+        if let Some(value) = parsed {
+            return Self::from_json(status, value);
+        }
+        let message = if body.is_empty() {
             format!("empty response (HTTP {status})")
         } else {
             let text = String::from_utf8_lossy(body);
@@ -64,7 +70,16 @@ impl Error {
         Self::Api {
             status,
             message,
-            body: parsed,
+            body: None,
+        }
+    }
+
+    /// Build an API error from an already-parsed JSON body.
+    pub fn from_json(status: u16, value: Value) -> Self {
+        Self::Api {
+            status,
+            message: describe_body(&value),
+            body: Some(value),
         }
     }
 

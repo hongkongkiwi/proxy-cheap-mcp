@@ -203,4 +203,31 @@ mod tests {
             Err(Error::MissingCredentials)
         ));
     }
+
+    #[test]
+    fn saves_and_loads_a_private_config_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("proxy-cheap/config.toml");
+        let config = FileConfig {
+            api_key: Some("key".to_string()),
+            api_secret: Some("secret".to_string()),
+            base_url: Some("https://api.proxy-cheap.com".to_string()),
+        };
+        save_to(&path, &config).unwrap();
+
+        let loaded = load_from(&path).unwrap().unwrap();
+        assert_eq!(loaded.api_key.as_deref(), Some("key"));
+        assert_eq!(loaded.api_secret.as_deref(), Some("secret"));
+        assert_eq!(
+            loaded.base_url.as_deref(),
+            Some("https://api.proxy-cheap.com")
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+    }
 }

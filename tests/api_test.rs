@@ -1,6 +1,9 @@
 mod common;
 
-use proxy_cheap_mcp::api::{ExtendPeriodRequest, Period, PeriodUnit, PriceRequest, Protocol};
+use proxy_cheap_mcp::api::{
+    AuthType, AutoExtend, ExtendPeriodRequest, LegacyOrderRequest, OrderRequest, Period,
+    PeriodUnit, PriceRequest, Protocol,
+};
 use proxy_cheap_mcp::config::ClientConfig;
 use proxy_cheap_mcp::{Error, ProxyCheapClient};
 
@@ -189,7 +192,26 @@ async fn retries_idempotent_gets_on_server_errors() {
 }
 
 #[tokio::test]
-async fn does_not_retry_posts_that_may_have_spent_money() {
+async fn does_not_retry_server_errors_on_spending_posts() {
+    let mock = common::start().await;
+    let client = client(mock.base_url(), true, 2);
+
+    let error = client
+        .extend_proxy(
+            "error",
+            &ExtendPeriodRequest {
+                period_in_months: 1,
+                coupon_code: None,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, Error::Api { status: 500, .. }));
+    assert_eq!(mock.request_count(), 1);
+}
+
+#[tokio::test]
+async fn retries_server_errors_on_read_only_posts() {
     let mock = common::start().await;
     let client = client(mock.base_url(), false, 2);
 
@@ -204,7 +226,7 @@ async fn does_not_retry_posts_that_may_have_spent_money() {
         .await
         .unwrap_err();
     assert!(matches!(error, Error::Api { status: 500, .. }));
-    assert_eq!(mock.request_count(), 1);
+    assert_eq!(mock.request_count(), 3);
 }
 
 #[tokio::test]
@@ -247,6 +269,144 @@ async fn reports_non_json_success_bodies() {
         .await
         .unwrap_err();
     assert!(error.to_string().contains("could not parse"));
+}
+
+#[tokio::test]
+async fn does_not_retry_rate_limited_spending_posts() {
+    let mock = common::start().await;
+    let client = client(mock.base_url(), true, 2);
+
+    let error = client
+        .extend_proxy(
+            "limited",
+            &ExtendPeriodRequest {
+                period_in_months: 1,
+                coupon_code: None,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, Error::Api { status: 429, .. }));
+    assert_eq!(mock.request_count(), 1);
+}
+
+#[tokio::test]
+async fn retries_rate_limited_read_only_posts() {
+    let mock = common::start().await;
+    let client = client(mock.base_url(), false, 2);
+
+    let price = client
+        .price(
+            "price-limited",
+            &PriceRequest {
+                plan_id: Some("basic".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(price.final_price, Some(3.39));
+    assert_eq!(mock.request_count(), 3);
+}
+
+#[tokio::test]
+async fn treats_http_200_error_payloads_as_failures() {
+    let mock = common::start().await;
+    let client = client(mock.base_url(), false, 0);
+
+    let error = client
+        .price(
+            "coupon-service",
+            &PriceRequest {
+                plan_id: Some("basic".to_string()),
+                coupon_code: Some("BAD".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("INVALID_COUPON_CODE"));
+    assert_eq!(error.exit_code(), 4);
+}
+
+#[tokio::test]
+async fn spending_endpoints_use_the_expected_wire_calls() {
+    let mock = common::start().await;
+    let client = client(mock.base_url(), true, 0);
+
+    client
+        .place_order(
+            "static-datacenter-ipv4",
+            &OrderRequest {
+                price: PriceRequest {
+                    plan_id: Some("basic".to_string()),
+                    country: Some("US".to_string()),
+                    ..Default::default()
+                },
+                auto_extend: Some(AutoExtend {
+                    is_enabled: true,
+                    traffic: Some(2.0),
+                }),
+            },
+        )
+        .await
+        .unwrap();
+    let captured = mock.last();
+    assert_eq!(captured.method, "POST");
+    assert_eq!(captured.path, "/v2/order/static-datacenter-ipv4/execute");
+    assert_eq!(
+        captured.json()["autoExtend"],
+        serde_json::json!({"isEnabled": true, "traffic": 2.0})
+    );
+
+    client
+        .extend_proxy(
+            "1410379",
+            &ExtendPeriodRequest {
+                period_in_months: 2,
+                coupon_code: Some("SAVE".to_string()),
+            },
+        )
+        .await
+        .unwrap();
+    let captured = mock.last();
+    assert_eq!(captured.path, "/proxies/1410379/extend-period");
+    assert_eq!(
+        captured.json(),
+        serde_json::json!({"periodInMonths": 2, "couponCode": "SAVE"})
+    );
+
+    client.buy_bandwidth("1410379", 5).await.unwrap();
+    let captured = mock.last();
+    assert_eq!(captured.path, "/proxies/1410379/buy-bandwidth");
+    assert_eq!(captured.json(), serde_json::json!({"bandwidth": 5}));
+
+    client.rotate_ip("1410379").await.unwrap();
+    let captured = mock.last();
+    assert_eq!(captured.path, "/proxies/1410379/rotate-ip");
+    assert_eq!(captured.method, "POST");
+
+    client
+        .legacy_execute(&LegacyOrderRequest::default())
+        .await
+        .unwrap();
+    assert_eq!(mock.last().path, "/order/execute");
+}
+
+#[tokio::test]
+async fn change_auth_type_always_sends_the_ips_array() {
+    let mock = common::start().await;
+    let client = client(mock.base_url(), true, 0);
+
+    client
+        .change_auth_type("1410379", AuthType::IpWhitelist, Vec::new())
+        .await
+        .unwrap();
+    let captured = mock.last();
+    assert_eq!(
+        captured.json(),
+        serde_json::json!({"newAuthType": "IP_WHITELIST", "ips": []})
+    );
 }
 
 #[tokio::test]
