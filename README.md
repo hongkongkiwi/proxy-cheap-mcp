@@ -32,7 +32,31 @@ Rust 1.85 or newer is required.
 
 ## Authenticate
 
-Create API keys at https://app.proxy-cheap.com/api-keys.
+### Browser login
+
+```bash
+proxy-cheap login
+```
+
+The command opens a compact Chrome or Edge app window at the Proxy-Cheap dashboard login page. Log in normally, including any Cloudflare check. The CLI waits for the `JWTproduction` session cookie, closes the window, validates the token with `GET /account/balance`, and stores it in `~/.config/proxy-cheap/config.toml` with mode 0600. The token is sent as `Authorization: Bearer` and works on the documented REST endpoints.
+
+```bash
+proxy-cheap login --environment staging   # staging dashboard
+proxy-cheap login --force                 # replace an existing token
+proxy-cheap login --browser "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"
+proxy-cheap login --profile-dir /path     # alternate browser profile
+proxy-cheap config show                   # auth method and token expiry
+proxy-cheap logout                        # remove the token
+proxy-cheap logout --browser-data         # also delete the browser profile
+```
+
+The login window uses a dedicated profile at `~/.config/proxy-cheap/browser-profile`, separate from the normal browser. Chrome, Edge, Brave, and Chromium are detected; override with `--browser` or `PROXY_CHEAP_BROWSER`. The first login may require a Cloudflare check once, after which the clearance is kept in that profile. Tokens expire after roughly 30 days; run `login` again when needed.
+
+A session token is a dashboard credential, not a scoped API key. Keep the config file private. `logout` removes the token but keeps API keys; `logout --browser-data` also deletes the dedicated profile and its cookies.
+
+### API keys
+
+Create keys at https://app.proxy-cheap.com/api-keys.
 
 ```bash
 export PROXY_CHEAP_API_KEY=...
@@ -43,14 +67,20 @@ Or persist them in the config file:
 
 ```bash
 proxy-cheap config init --api-key ... --api-secret ...
-proxy-cheap config show
 ```
+
+API keys take precedence over a stored session token. Use one or the other. `PROXY_CHEAP_SESSION_TOKEN` can supply a token directly.
 
 Resolution order: command-line flags, environment, `~/.config/proxy-cheap/config.toml`, then defaults. Service discovery, setup options, and pricing are public and work without credentials. Ordering and all account or proxy calls need them.
 
 ## CLI
 
 ```bash
+# Login
+proxy-cheap login
+proxy-cheap config show
+proxy-cheap logout
+
 # Discovery and pricing
 proxy-cheap services list
 proxy-cheap services options static-residential-ipv4 --plan-id basic
@@ -115,6 +145,8 @@ Client configuration:
   }
 }
 ```
+
+If you have run `proxy-cheap login`, the config file already contains the session token, so the `env` block can be omitted. The MCP server reads the same `~/.config/proxy-cheap/config.toml` as the CLI.
 
 ### Streamable HTTP
 
@@ -249,6 +281,8 @@ The published API documentation lags the live API in a few places. This client h
 - `periods` can contain `days` as well as `months`.
 - Order and proxy identifiers can be numbers, numeric strings, or UUIDs. Numbers and numeric strings are accepted everywhere.
 - `GET /orders/{id}` misspells `periodInMoths`. Both spellings are accepted.
+- `GET /proxies` returns `{"proxies":[...]}` on the live API, while the documentation and `GET /orders/{id}/proxies` use a bare array. Both shapes are accepted.
+- Dashboard session JWTs captured by `proxy-cheap login` are accepted as `Authorization: Bearer` on the documented REST endpoints. This was verified live against balance, proxy listing, order details, proxy details, and protocol/authentication options.
 - Several authenticated endpoints answer bad credentials with a `302` HTML redirect to the login page instead of `401`. Redirects are not followed; they are reported as authentication failures.
 - Retries: `429`, `5xx`, and network errors are retried only for read-only or idempotent calls (service discovery, setup, price calculation, protocol or whitelist changes). POSTs that spend money or rotate an IP are never retried, because a timed-out or rate-limited request may already have been processed.
 

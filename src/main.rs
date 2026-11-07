@@ -31,7 +31,13 @@ fn main() -> ExitCode {
 }
 
 fn init_tracing(verbose: bool) {
-    let default = if verbose { "debug" } else { "warn" };
+    // chromiumoxide logs every CDP message it does not recognise at warn level;
+    // that is noise for a normal login and would drown the CLI output.
+    let default = if verbose {
+        "debug,chromiumoxide=error,chromiumoxide::browser=error"
+    } else {
+        "warn,chromiumoxide=error,chromiumoxide::browser=error"
+    };
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default));
     let _ = tracing_subscriber::fmt()

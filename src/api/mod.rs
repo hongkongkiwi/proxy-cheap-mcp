@@ -6,13 +6,30 @@ pub use types::*;
 
 use std::time::Duration;
 
-use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderValue, RETRY_AFTER};
+use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderValue, RETRY_AFTER};
 use reqwest::{Client, Method, StatusCode};
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 
 use crate::config::ClientConfig;
 use crate::error::{Error, Result};
+
+/// The live API wraps `GET /proxies` in an object, while the documented and
+/// order-scoped responses are bare arrays. Accept both.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ProxyList {
+    Array(Vec<Proxy>),
+    Wrapped { proxies: Vec<Proxy> },
+}
+
+impl ProxyList {
+    fn into_vec(self) -> Vec<Proxy> {
+        match self {
+            Self::Array(proxies) | Self::Wrapped { proxies } => proxies,
+        }
+    }
+}
 
 /// Whether a request is safe to replay when the API reports a transient error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,9 +41,9 @@ enum Retry {
 }
 
 #[derive(Debug, Clone)]
-struct Credentials {
-    key: String,
-    secret: String,
+enum Credentials {
+    ApiKey { key: String, secret: String },
+    Bearer(String),
 }
 
 #[derive(Debug, Clone)]
@@ -41,12 +58,16 @@ impl ProxyCheapClient {
     pub fn new(config: &ClientConfig) -> Result<Self> {
         let credentials = match (&config.api_key, &config.api_secret) {
             (Some(key), Some(secret)) if !key.is_empty() && !secret.is_empty() => {
-                Some(Credentials {
+                Some(Credentials::ApiKey {
                     key: key.clone(),
                     secret: secret.clone(),
                 })
             }
-            _ => None,
+            _ => config
+                .session_token
+                .as_ref()
+                .filter(|token| !token.trim().is_empty())
+                .map(|token| Credentials::Bearer(token.clone())),
         };
 
         let http = Client::builder()
@@ -120,13 +141,15 @@ impl ProxyCheapClient {
 
     pub async fn order_proxies(&self, order_id: &str) -> Result<Vec<Proxy>> {
         let path = format!("/orders/{}/proxies", encode_segment(order_id));
-        self.get_json(&path, true).await
+        let list: ProxyList = self.get_json(&path, true).await?;
+        Ok(list.into_vec())
     }
 
     // -- Proxies ------------------------------------------------------------
 
     pub async fn list_proxies(&self) -> Result<Vec<Proxy>> {
-        self.get_json("/proxies", true).await
+        let list: ProxyList = self.get_json("/proxies", true).await?;
+        Ok(list.into_vec())
     }
 
     pub async fn get_proxy(&self, proxy_id: &str) -> Result<Proxy> {
@@ -338,9 +361,14 @@ impl ProxyCheapClient {
                 .header(ACCEPT, HeaderValue::from_static("application/json"));
 
             if let Some(credentials) = &self.credentials {
-                request = request
-                    .header("X-Api-Key", &credentials.key)
-                    .header("X-Api-Secret", &credentials.secret);
+                request = match credentials {
+                    Credentials::ApiKey { key, secret } => request
+                        .header("X-Api-Key", key)
+                        .header("X-Api-Secret", secret),
+                    Credentials::Bearer(token) => {
+                        request.header(AUTHORIZATION, format!("Bearer {token}"))
+                    }
+                };
             }
             if let Some(body) = &body {
                 request = request

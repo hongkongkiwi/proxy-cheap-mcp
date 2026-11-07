@@ -114,7 +114,11 @@ async fn handle(
     let authorized = headers
         .get("x-api-key")
         .and_then(|value| value.to_str().ok())
-        == Some("key");
+        == Some("key")
+        || headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            == Some("Bearer test-token");
 
     match (method.as_str(), path) {
         ("GET", "/v2/order") => {
@@ -187,10 +191,12 @@ async fn handle(
         .into_response(),
         ("GET", "/proxies") => {
             if authorized {
-                Json(json!([
-                    proxy_json("1410379", "ACTIVE"),
-                    proxy_json("1410380", "PENDING")
-                ]))
+                Json(json!({
+                    "proxies": [
+                        proxy_json("1410379", "ACTIVE"),
+                        proxy_json("1410380", "PENDING")
+                    ]
+                }))
                 .into_response()
             } else {
                 (
@@ -200,11 +206,17 @@ async fn handle(
                     .into_response()
             }
         }
-        ("GET", "/account/balance") => (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"message": "INVALID_CREDENTIALS"})),
-        )
-            .into_response(),
+        ("GET", "/account/balance") => {
+            if authorized {
+                Json(json!({"balance": 12.34})).into_response()
+            } else {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({"message": "INVALID_CREDENTIALS"})),
+                )
+                    .into_response()
+            }
+        }
         ("GET", "/health") => Json(json!({"status": "ok"})).into_response(),
         _ if path.starts_with("/proxies/") => proxy_action(method.as_str(), path).into_response(),
         _ if path == "/order/configuration" => Json(json!({

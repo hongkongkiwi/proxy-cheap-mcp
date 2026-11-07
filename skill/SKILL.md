@@ -11,19 +11,46 @@ signature verification and a webhook receiver.
 
 ## Authenticate
 
-Get an API key and secret from https://app.proxy-cheap.com/api-keys.
+### Browser login
+
+```bash
+proxy-cheap login
+```
+
+This opens a compact Chrome or Edge app window at the dashboard login page. Log
+in normally, including any Cloudflare check. The CLI waits for the dashboard
+session cookie (`JWTproduction`), closes the window, validates the token against
+`GET /account/balance`, and stores it in
+`~/.config/proxy-cheap/config.toml` with mode 0600. The token is sent as
+`Authorization: Bearer`.
+
+```bash
+proxy-cheap login --environment staging   # staging dashboard
+proxy-cheap login --force                 # replace an existing token
+proxy-cheap login --browser "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"
+proxy-cheap login --profile-dir /path     # alternate browser profile
+proxy-cheap logout                        # remove the token
+proxy-cheap logout --browser-data         # also delete the browser profile
+```
+
+The login window uses its own profile at
+`~/.config/proxy-cheap/browser-profile`, so it never touches the normal browser
+session. The first login may show a Cloudflare check once; the clearance is kept
+in that profile. The token expires after roughly 30 days; run `login` again when
+`config show` reports an expiry in the past.
+
+### API keys
+
+Create keys at https://app.proxy-cheap.com/api-keys.
 
 ```bash
 export PROXY_CHEAP_API_KEY=...
 export PROXY_CHEAP_API_SECRET=...
 ```
 
-Or persist them:
-
-```bash
-proxy-cheap config init --api-key ... --api-secret ...
-proxy-cheap config show
-```
+Or persist them with `proxy-cheap config init --api-key ... --api-secret ...`.
+API keys take precedence over a stored session token. `PROXY_CHEAP_SESSION_TOKEN`
+can supply a token directly.
 
 Precedence: flags, then environment, then `~/.config/proxy-cheap/config.toml`.
 Service listing, setup options, and price calculation are public and work without
@@ -159,6 +186,10 @@ Example stdio client config:
 }
 ```
 
+If you have run `proxy-cheap login`, the config file already contains the
+session token; the `env` block above can be omitted. The MCP server reads the
+same config file as the CLI.
+
 Tools cover the whole API: `list_services`, `get_service_options`,
 `price_order`, `place_order`, `get_order`, `get_order_proxies`, `list_proxies`,
 `get_proxy`, `extend_proxy`, `get_period_extension_price`,
@@ -178,15 +209,19 @@ This document is also exposed as the MCP resource `proxy-cheap://skill`.
    `extend_proxy`, `buy_proxy_bandwidth`, `legacy_place_order`.
 4. Do not rotate IPs, change protocols, or change authentication methods without
    explicit confirmation; these break live integrations.
-5. Treat returned proxy credentials as secrets. Do not paste them into logs,
-   commits, or third-party services.
+5. Treat returned proxy credentials and the stored session token as secrets. Do
+   not paste them into logs, commits, or third-party services.
 6. Quote API errors verbatim. Validation errors name the failing field and code.
+7. `proxy-cheap login` is an interactive CLI action, not an MCP tool. Never try
+   to log in by sending credentials through a tool call.
 
 ## Output and scripting
 
 All commands print JSON (pretty by default, `--compact` for one line). Global
-flags: `--api-key`, `--api-secret`, `--base-url`, `--timeout SECONDS`,
-`--retries N`, `--compact`, `--table`, `--verbose`.
+flags: `--api-key`, `--api-secret`, `--session-token`, `--base-url`,
+`--timeout SECONDS`, `--retries N`, `--compact`, `--table`, `--verbose`.
+`login` adds `--environment`, `--browser`, `--profile-dir`, `--force`, and
+`--login-timeout SECONDS`.
 
 Exit codes: `0` success, `2` invalid input, `3` credentials/config, `4` API
 error, `5` network error, `6` webhook signature failure.

@@ -1,9 +1,11 @@
 //! CLI, MCP server, and agent skill for the Proxy-Cheap API.
 
 pub mod api;
+pub mod browser;
 pub mod cli;
 pub mod config;
 pub mod error;
+pub mod login;
 pub mod mcp;
 pub mod skill;
 pub mod webhook;

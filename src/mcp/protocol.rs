@@ -20,9 +20,10 @@ IP rotation), account balance, legacy ordering, and webhook signature verificati
 Ordering and purchase tools spend real account balance: call price_order first, show the \
 total, and get explicit user confirmation before place_order, extend_proxy, \
 buy_proxy_bandwidth, or legacy_place_order. Credentials come from PROXY_CHEAP_API_KEY and \
-PROXY_CHEAP_API_SECRET (or the proxy-cheap config file). Public endpoints (services, setup, \
-price) work without credentials. The bundled usage guide is the resource \
-proxy-cheap://skill. This server is unofficial and not affiliated with Proxy-Cheap.";
+PROXY_CHEAP_API_SECRET, a dashboard session token captured by `proxy-cheap login`, or the \
+proxy-cheap config file. Public endpoints (services, setup, price) work without credentials. \
+The bundled usage guide is the resource proxy-cheap://skill. This server is unofficial and \
+not affiliated with Proxy-Cheap.";
 
 #[derive(Debug)]
 struct RpcError {

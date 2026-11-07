@@ -8,8 +8,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, Error)]
 pub enum Error {
     #[error(
-        "missing API credentials: set PROXY_CHEAP_API_KEY and PROXY_CHEAP_API_SECRET, pass \
-         --api-key/--api-secret, or run `proxy-cheap config init`"
+        "missing API credentials: run `proxy-cheap login` for an interactive browser login, \
+         set PROXY_CHEAP_API_KEY and PROXY_CHEAP_API_SECRET, or set \
+         PROXY_CHEAP_SESSION_TOKEN"
     )]
     MissingCredentials,
 

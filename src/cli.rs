@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
@@ -12,12 +13,13 @@ use crate::api::{
     AuthType, ExtendPeriodRequest, LegacyOrderRequest, OrderRequest, Period, PeriodUnit,
     PriceRequest, Protocol, Proxy, ProxyCheapClient, Service,
 };
+use crate::browser::{Environment, LoginOptions};
 use crate::config::{self, ClientConfig};
 use crate::error::{Error, Result};
 use crate::mcp::http::HttpConfig;
 use crate::mcp::protocol::McpServer;
 use crate::mcp::{stdio, tools};
-use crate::{skill, webhook};
+use crate::{login, skill, webhook};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -46,6 +48,15 @@ pub struct Cli {
         hide_env_values = true
     )]
     pub api_secret: Option<String>,
+
+    /// Dashboard session JWT captured by `proxy-cheap login`.
+    #[arg(
+        long,
+        global = true,
+        env = "PROXY_CHEAP_SESSION_TOKEN",
+        hide_env_values = true
+    )]
+    pub session_token: Option<String>,
 
     /// Override the API base URL.
     #[arg(long, global = true, env = "PROXY_CHEAP_BASE_URL")]
@@ -121,6 +132,36 @@ pub enum Command {
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
+    },
+    /// Log in through the Proxy-Cheap dashboard in a browser.
+    Login {
+        /// Proxy-Cheap environment to log in to.
+        #[arg(long, value_parser = ["production", "staging", "local"])]
+        environment: Option<String>,
+        /// Override the dashboard URL opened in the browser.
+        #[arg(long)]
+        app_url: Option<String>,
+        /// Override the session cookie name.
+        #[arg(long)]
+        cookie_name: Option<String>,
+        /// Browser executable to launch.
+        #[arg(long)]
+        browser: Option<PathBuf>,
+        /// Seconds to wait for the login to complete.
+        #[arg(long, default_value_t = 300)]
+        login_timeout: u64,
+        /// Log in again even if a usable session token is already stored.
+        #[arg(long)]
+        force: bool,
+        /// Dedicated browser profile directory.
+        #[arg(long)]
+        profile_dir: Option<PathBuf>,
+    },
+    /// Remove the stored session token (API keys are kept).
+    Logout {
+        /// Also delete the dedicated browser profile and its cookies.
+        #[arg(long)]
+        browser_data: bool,
     },
 }
 
@@ -634,6 +675,7 @@ pub async fn run(cli: Cli) -> Result<()> {
     let config = ClientConfig::resolve(
         cli.api_key,
         cli.api_secret,
+        cli.session_token,
         cli.base_url,
         cli.timeout,
         cli.retries,
@@ -871,6 +913,88 @@ pub async fn run(cli: Cli) -> Result<()> {
                 "path": skill::default_skill_dir().join("SKILL.md")
             })),
         },
+        Command::Login {
+            environment,
+            app_url,
+            cookie_name,
+            browser,
+            login_timeout,
+            force,
+            profile_dir,
+        } => {
+            let explicit_environment = environment.is_some();
+            let environment = match environment {
+                Some(name) => Environment::from_name(&name)?,
+                None => Environment::from_base_url(&config.base_url),
+            };
+            let mut effective = config.clone();
+            if explicit_environment {
+                effective.base_url = environment.api_base().to_string();
+            }
+            if !force {
+                if let Some(token) = effective.session_token.as_deref() {
+                    let usable =
+                        login::jwt_expiry(token).is_none_or(|expiry| expiry > now_unix() + 60);
+                    if usable {
+                        return output.print(&json!({
+                            "loggedIn": true,
+                            "alreadyLoggedIn": true,
+                            "environment": environment.label(),
+                            "authMethod": "session-token",
+                            "expiresAt": effective.session_token_expires_at,
+                            "configPath": config::config_path(),
+                        }));
+                    }
+                }
+            }
+            let mut options = LoginOptions::new(environment);
+            options.app_url = app_url;
+            options.cookie_name = cookie_name;
+            options.browser = browser;
+            options.profile_dir = profile_dir.unwrap_or_else(config::browser_profile_dir);
+            options.timeout = Duration::from_secs(login_timeout);
+            let path = config::config_path();
+            let outcome = login::capture_and_store(&effective, &path, &options).await?;
+            let note = effective
+                .has_api_key()
+                .then_some("existing API keys take precedence over the session token");
+            output.print(&json!({
+                "loggedIn": true,
+                "environment": outcome.environment.label(),
+                "authMethod": "session-token",
+                "expiresAt": outcome.expires_at,
+                "configPath": path,
+                "profileDir": outcome.profile_dir,
+                "note": note,
+            }))
+        }
+        Command::Logout { browser_data } => {
+            let path = config::config_path();
+            let mut file = config::load_from(&path)?.unwrap_or_default();
+            let had_token = file.session_token.take().is_some();
+            file.session_token_expires_at = None;
+            if had_token || path.exists() {
+                config::save_to(&path, &file)?;
+            }
+            let profile = config::browser_profile_dir();
+            let mut removed_profile = false;
+            if browser_data && profile.exists() {
+                std::fs::remove_dir_all(&profile).map_err(|error| {
+                    Error::Config(format!("could not remove {}: {error}", profile.display()))
+                })?;
+                removed_profile = true;
+            }
+            let note = (!browser_data && profile.exists()).then_some(
+                "browser profile and cookies were kept; pass --browser-data to delete them",
+            );
+            output.print(&json!({
+                "loggedOut": true,
+                "removedSessionToken": had_token,
+                "removedBrowserProfile": removed_profile,
+                "profileDir": profile,
+                "note": note,
+            }))
+        }
         Command::Config { command } => match command {
             ConfigCommand::Init {
                 api_key,
@@ -889,6 +1013,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                 let merged = config::FileConfig {
                     api_key: api_key.or(existing.api_key),
                     api_secret: api_secret.or(existing.api_secret),
+                    session_token: existing.session_token,
+                    session_token_expires_at: existing.session_token_expires_at,
                     base_url: base_url.or(existing.base_url),
                 };
                 if merged.api_key.is_none() || merged.api_secret.is_none() {
@@ -907,15 +1033,27 @@ pub async fn run(cli: Cli) -> Result<()> {
             ConfigCommand::Show => output.print(&json!({
                 "configPath": config::config_path(),
                 "baseUrl": config.base_url,
+                "authMethod": config.auth_method(),
                 "apiKey": config.api_key.as_deref().map(config::redact),
                 "apiSecret": config.api_secret.as_deref().map(config::redact),
+                "sessionToken": config.session_token.as_deref().map(config::redact),
+                "sessionTokenExpiresAt": config.session_token_expires_at,
+                "apiKeyConfigured": config.has_api_key(),
+                "sessionTokenConfigured": config.has_session_token(),
                 "timeoutSeconds": config.timeout_secs,
                 "retries": config.max_retries,
-                "credentialsConfigured": config.api_key.is_some() && config.api_secret.is_some(),
+                "credentialsConfigured": config.has_api_key() || config.has_session_token(),
             })),
             ConfigCommand::Path => output.print(&json!({ "path": config::config_path() })),
         },
     }
+}
+
+fn now_unix() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 async fn http_serve(

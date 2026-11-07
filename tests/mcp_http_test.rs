@@ -28,6 +28,8 @@ fn mcp_server(base_url: &str) -> Arc<McpServer> {
     let config = ClientConfig {
         api_key: Some("key".to_string()),
         api_secret: Some("secret".to_string()),
+        session_token: None,
+        session_token_expires_at: None,
         base_url: base_url.to_string(),
         timeout_secs: 5,
         max_retries: 0,

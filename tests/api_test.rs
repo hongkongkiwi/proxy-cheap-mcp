@@ -11,6 +11,8 @@ fn client(base_url: &str, credentials: bool, retries: u32) -> ProxyCheapClient {
     let config = ClientConfig {
         api_key: credentials.then(|| "key".to_string()),
         api_secret: credentials.then(|| "secret".to_string()),
+        session_token: None,
+        session_token_expires_at: None,
         base_url: base_url.to_string(),
         timeout_secs: 5,
         max_retries: retries,
@@ -157,11 +159,65 @@ async fn maps_validation_errors() {
 #[tokio::test]
 async fn maps_unauthorized_responses() {
     let mock = common::start().await;
-    let client = client(mock.base_url(), true, 0);
+    let config = ClientConfig {
+        api_key: Some("wrong".to_string()),
+        api_secret: Some("wrong".to_string()),
+        session_token: None,
+        session_token_expires_at: None,
+        base_url: mock.base_url().to_string(),
+        timeout_secs: 5,
+        max_retries: 0,
+    };
+    let client = ProxyCheapClient::new(&config).unwrap();
 
     let error = client.balance().await.unwrap_err();
     assert!(error.to_string().contains("INVALID_CREDENTIALS"));
     assert_eq!(error.exit_code(), 3);
+}
+
+#[tokio::test]
+async fn uses_a_session_token_as_a_bearer_token() {
+    let mock = common::start().await;
+    let config = ClientConfig {
+        api_key: None,
+        api_secret: None,
+        session_token: Some("test-token".to_string()),
+        session_token_expires_at: None,
+        base_url: mock.base_url().to_string(),
+        timeout_secs: 5,
+        max_retries: 0,
+    };
+    let client = ProxyCheapClient::new(&config).unwrap();
+
+    let proxies = client.list_proxies().await.unwrap();
+    assert_eq!(proxies.len(), 2);
+    let captured = mock.last();
+    assert_eq!(
+        captured.header("authorization").as_deref(),
+        Some("Bearer test-token")
+    );
+    assert!(captured.header("x-api-key").is_none());
+    assert!(captured.header("x-api-secret").is_none());
+}
+
+#[tokio::test]
+async fn prefers_api_keys_over_a_session_token() {
+    let mock = common::start().await;
+    let config = ClientConfig {
+        api_key: Some("key".to_string()),
+        api_secret: Some("secret".to_string()),
+        session_token: Some("test-token".to_string()),
+        session_token_expires_at: None,
+        base_url: mock.base_url().to_string(),
+        timeout_secs: 5,
+        max_retries: 0,
+    };
+    let client = ProxyCheapClient::new(&config).unwrap();
+
+    client.list_proxies().await.unwrap();
+    let captured = mock.last();
+    assert_eq!(captured.header("x-api-key").as_deref(), Some("key"));
+    assert!(captured.header("authorization").is_none());
 }
 
 #[tokio::test]
@@ -170,6 +226,8 @@ async fn explains_login_redirects_as_auth_failures() {
     let config = ClientConfig {
         api_key: Some("wrong".to_string()),
         api_secret: Some("wrong".to_string()),
+        session_token: None,
+        session_token_expires_at: None,
         base_url: mock.base_url().to_string(),
         timeout_secs: 5,
         max_retries: 0,

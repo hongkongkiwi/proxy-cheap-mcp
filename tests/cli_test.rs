@@ -1,5 +1,6 @@
 mod common;
 
+use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 
@@ -247,4 +248,82 @@ async fn proxies_list_sends_credentials_and_renders_a_table() {
     assert!(text.contains("1410379"));
     assert!(text.contains("203.0.113.10"));
     assert_eq!(mock.last().header("x-api-key").as_deref(), Some("key"));
+}
+
+#[test]
+fn login_reports_an_existing_session_without_opening_a_browser() {
+    let directory = tempfile::tempdir().unwrap();
+    let config_dir = directory.path().join("proxy-cheap");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(
+        config_dir.join("config.toml"),
+        "session_token = \"opaque-token\"\n",
+    )
+    .unwrap();
+
+    let output = Command::new(binary())
+        .arg("login")
+        .env("XDG_CONFIG_HOME", directory.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result = stdout_json(&output);
+    assert_eq!(result["alreadyLoggedIn"], true);
+    assert_eq!(result["authMethod"], "session-token");
+}
+
+#[test]
+fn logout_removes_the_session_but_keeps_api_keys_and_can_delete_browser_data() {
+    let directory = tempfile::tempdir().unwrap();
+    let config_dir = directory.path().join("proxy-cheap");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(
+        config_dir.join("config.toml"),
+        "api_key = \"key\"\napi_secret = \"secret\"\nsession_token = \"opaque-token\"\nsession_token_expires_at = 1893456000\n",
+    )
+    .unwrap();
+    let profile = config_dir.join("browser-profile");
+    fs::create_dir_all(&profile).unwrap();
+
+    let output = Command::new(binary())
+        .arg("logout")
+        .env("XDG_CONFIG_HOME", directory.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(stdout_json(&output)["removedSessionToken"], true);
+    let text = fs::read_to_string(config_dir.join("config.toml")).unwrap();
+    assert!(!text.contains("session_token"));
+    assert!(text.contains("api_key = \"key\""));
+    assert!(text.contains("api_secret = \"secret\""));
+    assert!(
+        profile.exists(),
+        "logout without --browser-data must keep the profile"
+    );
+
+    let output = Command::new(binary())
+        .args(["logout", "--browser-data"])
+        .env("XDG_CONFIG_HOME", directory.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(stdout_json(&output)["removedBrowserProfile"], true);
+    assert!(!profile.exists());
+}
+
+#[test]
+fn logout_without_a_config_file_is_a_no_op() {
+    let directory = tempfile::tempdir().unwrap();
+    let output = Command::new(binary())
+        .arg("logout")
+        .env("XDG_CONFIG_HOME", directory.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(stdout_json(&output)["removedSessionToken"], false);
+    assert!(!directory.path().join("proxy-cheap/config.toml").exists());
 }
