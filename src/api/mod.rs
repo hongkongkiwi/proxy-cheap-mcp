@@ -412,7 +412,7 @@ fn parse_json<T: DeserializeOwned>(status: StatusCode, body: &[u8]) -> Result<T>
     serde_json::from_value(value).map_err(|error| Error::Api {
         status: status.as_u16(),
         message: format!("could not parse the API response: {error}"),
-        body: None,
+        body: serde_json::from_slice(body).ok(),
     })
 }
 
